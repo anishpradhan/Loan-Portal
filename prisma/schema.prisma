@@ -1,0 +1,198 @@
+// Loan portfolio monitoring — data model
+// Money is stored as Decimal(18,2) in the source system's sign convention
+// (outstanding balances are negative, as exported by core banking).
+// The domain layer normalises signs; see src/domain.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN // manage users, imports, settings; sees everything
+  SENIOR // senior officials: read everything, generate reports
+  PROVINCE_MANAGER // read data of branches in own province
+  BRANCH_MANAGER // read data of own branch
+}
+
+model Province {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  email     String?
+  manager   String?
+  branches  Branch[]
+  users     User[]
+  createdAt DateTime @default(now())
+}
+
+model Branch {
+  id            Int             @id @default(autoincrement())
+  code          String          @unique // "001"
+  name          String          @unique // "001-Main Branch" (as exported)
+  displayName   String? // "Main Branch"
+  email         String?
+  provinceId    Int?
+  province      Province?       @relation(fields: [provinceId], references: [id])
+  accounts      LoanAccount[]
+  users         User[]
+  budgets       BudgetTarget[]
+}
+
+model Product {
+  id            Int           @id @default(autoincrement())
+  name          String        @unique // Chart of Account
+  // Staff loans are excluded from loan-loss provisioning
+  excludeFromProvisioning Boolean @default(false)
+  accounts      LoanAccount[]
+}
+
+model Borrower {
+  id        Int           @id @default(autoincrement())
+  name      String
+  phone     String?
+  address   String?
+  memberId  String?       @unique // MID from core banking
+  accounts  LoanAccount[]
+}
+
+model LoanAccount {
+  id            Int               @id @default(autoincrement())
+  accountNumber String            @unique // 15 digits: branch(3) + chart(5) + serial(7)
+  branchId      Int
+  branch        Branch            @relation(fields: [branchId], references: [id])
+  productId     Int
+  product       Product           @relation(fields: [productId], references: [id])
+  borrowerId    Int
+  borrower      Borrower          @relation(fields: [borrowerId], references: [id])
+  openingDate   DateTime?         @db.Date
+  maturityDate  DateTime?         @db.Date
+  rows          LoanSnapshotRow[]
+  overrides     ProvisionOverride[]
+  followUps     FollowUp[]
+
+  @@index([branchId])
+  @@index([productId])
+}
+
+model Snapshot {
+  id          Int               @id @default(autoincrement())
+  asOf        DateTime          @unique // "Report Date & Time" from the export
+  sourceFile  String
+  checksum    String            @unique // sha256 of file, prevents duplicate uploads
+  rowCount    Int
+  note        String?
+  uploadedBy  User?             @relation(fields: [uploadedById], references: [id])
+  uploadedById Int?
+  createdAt   DateTime          @default(now())
+  rows        LoanSnapshotRow[]
+}
+
+model LoanSnapshotRow {
+  id                Int         @id @default(autoincrement())
+  snapshotId        Int
+  snapshot          Snapshot    @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  accountId         Int
+  account           LoanAccount @relation(fields: [accountId], references: [id])
+
+  interestRate      Decimal     @db.Decimal(9, 4)
+  penalRate         Decimal     @db.Decimal(9, 4)
+  granted           Decimal     @db.Decimal(18, 2)
+  principal         Decimal     @db.Decimal(18, 2)
+  interestPaid      Decimal     @db.Decimal(18, 2)
+  penalChargePaid   Decimal     @db.Decimal(18, 2)
+  principalPaid     Decimal     @db.Decimal(18, 2)
+  principalBalance  Decimal     @db.Decimal(18, 2)
+  installmentAmount Decimal     @db.Decimal(18, 2)
+  penalBalance      Decimal     @db.Decimal(18, 2)
+  interestBalance   Decimal     @db.Decimal(18, 2)
+  chargeBalance     Decimal     @db.Decimal(18, 2)
+  overduePrincipal  Decimal     @db.Decimal(18, 2)
+  overdueInterest   Decimal     @db.Decimal(18, 2)
+  installmentsPaid  Int
+  dpd               Int // "Overdue" column = days past due
+  term              Int
+  lastTransactionDate DateTime? @db.Date
+  frequency         String?
+  accruedInterest   Decimal     @db.Decimal(18, 2)
+  accruedPenalty    Decimal     @db.Decimal(18, 2)
+
+  @@unique([snapshotId, accountId])
+  @@index([accountId])
+}
+
+// Manual additional provisioning ("Add: LLP" in the workbook)
+model ProvisionOverride {
+  id          Int         @id @default(autoincrement())
+  accountId   Int
+  account     LoanAccount @relation(fields: [accountId], references: [id])
+  amount      Decimal     @db.Decimal(18, 2)
+  reason      String
+  effectiveFrom DateTime  @db.Date
+  effectiveTo DateTime?   @db.Date
+  createdBy   User?       @relation(fields: [createdById], references: [id])
+  createdById Int?
+  createdAt   DateTime    @default(now())
+}
+
+// Monthly outstanding-portfolio target per branch, Nepali fiscal year
+model BudgetTarget {
+  id         Int     @id @default(autoincrement())
+  branchId   Int
+  branch     Branch  @relation(fields: [branchId], references: [id])
+  fiscalYear String  // e.g. "2083/84"
+  month      Int     // 1 = Shrawan ... 12 = Ashad
+  amount     Decimal @db.Decimal(18, 2)
+
+  @@unique([branchId, fiscalYear, month])
+}
+
+model FollowUp {
+  id        Int         @id @default(autoincrement())
+  accountId Int
+  account   LoanAccount @relation(fields: [accountId], references: [id])
+  note      String
+  dueDate   DateTime?   @db.Date
+  done      Boolean     @default(false)
+  author    User?       @relation(fields: [authorId], references: [id])
+  authorId  Int?
+  createdAt DateTime    @default(now())
+}
+
+model User {
+  id           Int       @id @default(autoincrement())
+  username     String    @unique
+  fullName     String
+  passwordHash String
+  role         Role
+  branchId     Int?
+  branch       Branch?   @relation(fields: [branchId], references: [id])
+  provinceId   Int?
+  province     Province? @relation(fields: [provinceId], references: [id])
+  active       Boolean   @default(true)
+  mustChangePassword Boolean @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  snapshots    Snapshot[]
+  overrides    ProvisionOverride[]
+  followUps    FollowUp[]
+  auditLogs    AuditLog[]
+}
+
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String   // e.g. "snapshot.import", "user.create", "report.export"
+  entity    String?
+  entityId  String?
+  detail    Json?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}

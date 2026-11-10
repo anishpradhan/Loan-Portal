@@ -1,0 +1,63 @@
+# Loan Portfolio Monitor — intranet deployment
+#   cp .env.example .env   (then edit the values)
+#   docker compose up -d --build
+services:
+  db:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: loanportal
+      POSTGRES_USER: loanportal
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loanportal -d loanportal"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # Not published to the host: only the app container can reach the database.
+
+  app:
+    build: .
+    image: loan-portal:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://loanportal:${DB_PASSWORD}@db:5432/loanportal
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      TZ: Asia/Kathmandu
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    volumes:
+      - appdata:/app/data
+    shm_size: 256mb # Chromium (PDF export)
+
+  backup:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${DB_PASSWORD}
+      RETAIN_DAYS: ${BACKUP_RETAIN_DAYS:-30}
+    volumes:
+      - ${BACKUP_DIR:-./backups}:/backups
+    # Nightly compressed dump; old dumps are pruned after RETAIN_DAYS.
+    entrypoint: >
+      sh -c 'while true; do
+        f=/backups/loanportal-$$(date +%Y%m%d-%H%M).sql.gz;
+        pg_dump -h db -U loanportal loanportal | gzip > $$f && echo "backup written: $$f";
+        find /backups -name "loanportal-*.sql.gz" -mtime +$$RETAIN_DAYS -delete;
+        sleep 86400;
+      done'
+
+volumes:
+  pgdata:
+  appdata:
